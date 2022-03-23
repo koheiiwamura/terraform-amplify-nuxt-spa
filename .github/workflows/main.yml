@@ -1,0 +1,114 @@
+name: Deploy service
+
+on:
+  pull_request:
+    branches-ignore:
+      - '*'
+
+env:
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  REPO_NAME: ${{ secrets.REPO_NAME }}
+  SPA_BUCKET: ${{ secrets.SPA_BUCKET }}
+
+jobs:
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.REPO_NAME }}-ci
+          role-session-name: ${{ env.REPO_NAME }}-github
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.1.7
+
+      - name: Terraform format
+        run: terraform fmt -recursive -check -diff
+
+      - name: Terraform plan develop
+        working-directory: ./terraform/environments/dev
+        run: |
+          terraform init
+          terraform validate
+          terraform plan
+
+      - name: Terraform apply develop
+        if: github.ref == 'refs/heads/main'
+        working-directory: ./terraform/environments/dev
+        run: |
+          terraform apply -auto-approve
+
+      - name: Terraform plan prod
+        working-directory: ./terraform/environments/prod
+        run: |
+          terraform init
+          terraform validate
+          terraform plan
+
+      - name: Terraform apply prod
+        if: github.ref == 'refs/heads/main'
+        working-directory: ./terraform/environments/prod
+        run: |
+          terraform apply -auto-approve
+
+  application:
+    name: Application
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install modules
+        run: yarn
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.REPO_NAME }}-ci
+          role-session-name: ${{ env.REPO_NAME }}-github
+
+      - name: Application lint
+        run: |
+          yarn lint
+
+      - name: Application build dev
+        run: |
+          sh scripts/secretsmanager_to_dotenv.sh ${{ env.REPO_NAME }}-dev
+          yarn generate
+          rm .env
+
+      - name: Application deploy dev
+        if: github.ref == 'refs/heads/main'
+        run: |
+          aws s3 rm s3://${{ env.SPA_BUCKET }}-dev/ --recursive
+          aws s3 cp ./dist/ s3://${{ env.SPA_BUCKET }}-dev/ --recursive
+
+      - name: Application build prod
+        run: |
+          sh scripts/secretsmanager_to_dotenv.sh ${{ env.REPO_NAME }}-prod
+          yarn generate
+          rm .env
+
+      - name: Application deploy prod
+        if: github.ref == 'refs/heads/main'
+        run: |
+          aws s3 rm s3://${{ env.SPA_BUCKET }}/ --recursive
+          aws s3 cp ./dist/ s3://${{ env.SPA_BUCKET }}/ --recursive
